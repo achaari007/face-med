@@ -1,6 +1,8 @@
 FROM python:3.10-slim
 
-# Install system dependencies for dlib
+# --------------------------------------------------
+# System dependencies required for OpenCV & dlib
+# --------------------------------------------------
 RUN apt-get update && apt-get install -y \
     build-essential \
     cmake \
@@ -8,15 +10,26 @@ RUN apt-get update && apt-get install -y \
     libsm6 \
     libxext6 \
     libxrender-dev \
+    libgl1 \
     && rm -rf /var/lib/apt/lists/*
 
+# --------------------------------------------------
+# Set workdir
+# --------------------------------------------------
 WORKDIR /app
 
+# --------------------------------------------------
+# Install Python dependencies
+# --------------------------------------------------
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# --------------------------------------------------
+# Copy application code
+# --------------------------------------------------
 COPY . .
 
-EXPOSE 8000
-
+# --------------------------------------------------
+# Run FastAPI app
+# --------------------------------------------------
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]

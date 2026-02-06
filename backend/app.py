@@ -1,36 +1,15 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
-import os
-import shutil
-import uuid
-import json
+from fastapi.staticfiles import StaticFiles
 import face_recognition
+import numpy as np
+import json, os, shutil, uuid, io
+from PIL import Image
 
-# -----------------------------
-# Paths & Directories
-# -----------------------------
-
-UPLOAD_DIR = "data/uploads"
-FACE_DIR = "data/faces"
-MAPPING_FILE = "data/mapping.json"
-PATIENT_FILE = "data/patients.json"
-TEMP_FILE = "data/temp.jpg"
-
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-os.makedirs(FACE_DIR, exist_ok=True)
-
-for file in [MAPPING_FILE, PATIENT_FILE]:
-    if not os.path.exists(file):
-        with open(file, "w") as f:
-            json.dump({}, f)
-
-# -----------------------------
-# App Setup
-# -----------------------------
 
 app = FastAPI()
 
+# ---------------- CORS ----------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -38,134 +17,157 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# -----------------------------
-# Health Check
-# -----------------------------
+app.mount("/data", StaticFiles(directory="data"), name="data")
 
-@app.get("/")
-def root():
-    return {"status": "backend running"}
 
-# -----------------------------
-# Medical Document Upload
-# -----------------------------
+# ---------------- Paths ----------------
+DATA_DIR = "data"
+PATIENTS_FILE = f"{DATA_DIR}/patients.json"
+FACES_FILE = f"{DATA_DIR}/faces.json"
+UPLOADS_DIR = f"{DATA_DIR}/uploads"
+MAPPING_FILE = f"{DATA_DIR}/mapping.json"
+AUDIT_FILE = f"{DATA_DIR}/audit.json"
 
-@app.post("/upload")
-async def upload_file(file: UploadFile = File(...)):
-    path = os.path.join(UPLOAD_DIR, file.filename)
-    with open(path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
-    return {"message": "file uploaded", "filename": file.filename}
+os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(UPLOADS_DIR, exist_ok=True)
 
-# -----------------------------
-# Face Registration
-# -----------------------------
+# ---------------- Helpers ----------------
+def load_json(path, default):
+    if not os.path.exists(path):
+        return default
+    with open(path, "r") as f:
+        return json.load(f)
 
-@app.post("/register-face")
-async def register_face(file: UploadFile = File(...)):
-    face_id = f"{uuid.uuid4()}.jpg"
-    path = os.path.join(FACE_DIR, face_id)
+def save_json(path, data):
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
 
-    with open(path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+def bytes_to_image(img_bytes: bytes):
+    image = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+    return np.array(image)
 
-    return {"message": "face registered", "face_id": face_id}
+# ---------------- Health ----------------
+@app.get("/health")
+def health():
+    return {"status": "ok"}
 
-# -----------------------------
-# Face Recognition
-# -----------------------------
+# ============================================================
+# REGISTER PATIENT + FACE
+# ============================================================
+@app.post("/register-patient")
+async def register_patient(
+    name: str = Form(...),
+    age: int = Form(...),
+    blood_group: str = Form(...),
+    face: UploadFile = File(...)
+):
+    img_bytes = await face.read()
+    image = bytes_to_image(img_bytes)
 
-@app.post("/recognize-face")
-async def recognize_face(file: UploadFile = File(...)):
-    with open(TEMP_FILE, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+    encodings = face_recognition.face_encodings(image)
+    if len(encodings) != 1:
+        raise HTTPException(400, "Exactly one face must be visible")
 
-    unknown_image = face_recognition.load_image_file(TEMP_FILE)
-    unknown_encodings = face_recognition.face_encodings(unknown_image)
+    patients = load_json(PATIENTS_FILE, {})
+    faces = load_json(FACES_FILE, {})
 
-    if not unknown_encodings:
-        return {"match": False, "reason": "no face detected"}
+    patient_id = str(uuid.uuid4())
 
-    unknown_encoding = unknown_encodings[0]
-
-    for face_file in os.listdir(FACE_DIR):
-        known_image = face_recognition.load_image_file(
-            os.path.join(FACE_DIR, face_file)
-        )
-        known_encodings = face_recognition.face_encodings(known_image)
-
-        if not known_encodings:
-            continue
-
-        match = face_recognition.compare_faces(
-            [known_encodings[0]], unknown_encoding
-        )[0]
-
-        if match:
-            return {"match": True, "face_id": face_file}
-
-    return {"match": False}
-
-# -----------------------------
-# Face ↔ Medical Records
-# -----------------------------
-
-@app.post("/link-record")
-def link_record(face_id: str, filename: str):
-    with open(MAPPING_FILE, "r") as f:
-        mapping = json.load(f)
-
-    mapping.setdefault(face_id, [])
-    if filename not in mapping[face_id]:
-        mapping[face_id].append(filename)
-
-    with open(MAPPING_FILE, "w") as f:
-        json.dump(mapping, f, indent=2)
-
-    return {"records": mapping[face_id]}
-
-@app.get("/records/{face_id}")
-def get_records_for_face(face_id: str):
-    with open(MAPPING_FILE, "r") as f:
-        mapping = json.load(f)
-
-    return {"records": mapping.get(face_id, [])}
-
-# -----------------------------
-# Patient Details
-# -----------------------------
-
-@app.post("/patient")
-def save_patient(face_id: str, name: str, age: int, blood_group: str):
-    with open(PATIENT_FILE, "r") as f:
-        patients = json.load(f)
-
-    patients[face_id] = {
+    patients[patient_id] = {
         "name": name,
         "age": age,
         "blood_group": blood_group
     }
+    faces[patient_id] = encodings[0].tolist()
 
-    with open(PATIENT_FILE, "w") as f:
-        json.dump(patients, f, indent=2)
+    save_json(PATIENTS_FILE, patients)
+    save_json(FACES_FILE, faces)
 
-    return {"patient": patients[face_id]}
+    return {
+        "message": "Patient registered successfully",
+        "patient_id": patient_id
+    }
 
-@app.get("/patient/{face_id}")
-def get_patient(face_id: str):
-    with open(PATIENT_FILE, "r") as f:
-        patients = json.load(f)
+# ============================================================
+# RECOGNIZE FACE
+# ============================================================
+@app.post("/recognize")
+async def recognize(face: UploadFile = File(...)):
+    img_bytes = await face.read()
+    image = bytes_to_image(img_bytes)
 
-    return patients.get(face_id, {})
+    encodings = face_recognition.face_encodings(image)
+    if len(encodings) != 1:
+        raise HTTPException(400, "Exactly one face must be visible")
 
-# -----------------------------
-# Download File
-# -----------------------------
+    unknown = encodings[0]
+    patients = load_json(PATIENTS_FILE, {})
+    faces = load_json(FACES_FILE, {})
 
-@app.get("/download/{filename}")
-def download_file(filename: str):
-    file_path = os.path.join(UPLOAD_DIR, filename)
-    if not os.path.exists(file_path):
-        return {"error": "file not found"}
+    for pid, known in faces.items():
+        match = face_recognition.compare_faces(
+            [np.array(known)],
+            unknown,
+            tolerance=0.5
+        )
+        if match[0]:
+            p = patients[pid]
+            return {
+                "patient_id": pid,
+                "name": p["name"],
+                "age": p["age"],
+                "blood_group": p["blood_group"]
+            }
 
-    return FileResponse(file_path, filename=filename)
+    raise HTTPException(404, "Not Found")
+
+# ============================================================
+# UPLOAD MEDICAL RECORD
+# ============================================================
+@app.post("/upload-record/{patient_id}")
+async def upload_record(
+    patient_id: str,
+    file: UploadFile = File(...),
+    role: str = Form(...)
+):
+    patients = load_json(PATIENTS_FILE, {})
+    if patient_id not in patients:
+        raise HTTPException(404, "Patient not found")
+
+    patient_dir = f"{UPLOADS_DIR}/{patient_id}"
+    os.makedirs(patient_dir, exist_ok=True)
+
+    file_path = f"{patient_dir}/{file.filename}"
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    mapping = load_json(MAPPING_FILE, {})
+    mapping.setdefault(patient_id, []).append(file.filename)
+    save_json(MAPPING_FILE, mapping)
+
+    audit = load_json(AUDIT_FILE, [])
+    audit.append({
+        "patient_id": patient_id,
+        "action": "upload",
+        "file": file.filename,
+        "role": role
+    })
+    save_json(AUDIT_FILE, audit)
+
+    return {
+        "message": (
+            "Uploaded successfully. Records visible to Doctors only."
+            if role == "nurse"
+            else "Uploaded successfully."
+        )
+    }
+
+# ============================================================
+# GET MEDICAL RECORDS (Doctor view)
+# ============================================================
+@app.get("/records/{patient_id}")
+def get_records(patient_id: str):
+    mapping = load_json(MAPPING_FILE, {})
+    return {
+        "files": mapping.get(patient_id, [])
+    }

@@ -1,0 +1,14 @@
+# Runtime / patient data (NEVER commit)
+backend/data/
+backend/data/**
+
+# Node
+node_modules/
+
+# Python
+__pycache__/
+*.pyc
+
+# OS junk
+.DS_Store
+Thumbs.db
