@@ -1,0 +1,8 @@
+download the code 
+docker is important
+docker compose down
+docker compose up
+
+interface
+http://localhost:3000/
+
